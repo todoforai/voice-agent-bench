@@ -17,8 +17,8 @@ Fairness rules: every system under test gets the **same fixed mock LLM** (script
 fixed TTFT and token rate — the numbers measure the voice pipeline, not the language model),
 the same audio devices, and the same scenario script. Results so far: [`results/RESULTS.md`](results/RESULTS.md).
 
-Developed alongside [voiceloop](https://github.com/todoforai/voiceloop) (it lives at `bench/`
-there and is split to this repo), but the rig is agent-agnostic — SUT pages exist for voiceloop
+Developed alongside [voiceloop](https://github.com/todoforai/voiceloop) ([live demo](https://todoforai.github.io/voiceloop/)
+— it lives at `bench/` there and is split to this repo), but the rig is agent-agnostic — SUT pages exist for voiceloop
 and ElevenLabs ConvAI, and adding one for Pipecat/Vapi/LiveKit/etc. is a page or script that
 talks to the virtual devices. PRs with new SUTs or scenarios welcome.
 
