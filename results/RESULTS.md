@@ -20,7 +20,8 @@ talked over the user (hesitation) / cut its own reply (echo), out of 30 turns.
 |---|---|---|---|---|---|
 | OpenAI Realtime * | 870ms | 1290ms | 12/30 → **0** (yields in 130ms) | 790ms | **17/30** |
 | **voiceloop** · deepgram + EL flash | 980ms | 1400ms | 2/30 → **0** (420ms) | 930ms | **0** |
-| **voiceloop** · deepgram + Piper (free, local) | 970ms | 1400ms | 0/30 → **0** | — | — |
+| **voiceloop** · deepgram + Piper (free TTS, local) | 970ms | 1400ms | 0/30 → **0** | — | — |
+| **voiceloop** · webspeech + Piper (zero-key, browser STT) | 2110ms | — | — | — | — |
 | Pipecat 1.8.1 · same providers | 1050ms | 1290ms | 12/30 → **2** (200ms) | 1320ms | **20/30** |
 | ElevenLabs ConvAI | 1450ms | 1810ms | 2/30 → **0** (490ms) | 1410ms | 0 |
 
@@ -54,7 +55,9 @@ Realtime is the disclosed exception (speech-to-speech, its own model).
 | ElevenLabs ConvAI (their full agent stack) | 1454ms | 1632 | 1042ms | 8 |
 | **voiceloop** · EL Scribe + EL flash TTS | 1562ms | 1855 | 1566ms | 12 |
 | **voiceloop** · Speechmatics + EL flash TTS | 1706ms | 2069 | 1046ms | 17 |
-| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · webspeech + Piper | _2414ms_ | _4771_ | _1406ms_ | _32_ |
+| **voiceloop** · webspeech + Piper (zero-key browser STT — the demo default) | 2113ms | 2607 | 1257ms | 30 |
+| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · deepgram + Piper | _1801ms_ | _2556_ | _1379ms_ | _25_ |
+| _TODOforAI shared-voice (our shipped Jarvis; internal)_ · webspeech + Piper (shipped default) | _2241ms_ | _6957_ | _915ms_ | _25_ |
 
 voice→voice = end of the person's speech → first audible agent audio (from the recording).
 barge-in stop = person starts interrupting → agent audio actually stops.
@@ -64,11 +67,21 @@ mock LLM, so its row is not fully apples-to-apples (see caveats below).
 
 ### Where the milliseconds go (voiceloop, deepgram + EL flash)
 
-| stage | median |
-|---|---|
-| STT first partial (person start → first transcript) | 714ms |
-| end-of-turn delay (person end → turn committed) | 366ms |
-| TTS first audio (first LLM token → audible) | 418ms |
+| stage | deepgram + EL flash | webspeech + Piper (zero-key) |
+|---|---|---|
+| STT first partial (person start → first transcript) | 714ms | 591ms |
+| end-of-turn delay (person end → turn committed) | 366ms | **1565ms** |
+| TTS first audio (first LLM token → audible) | 418ms | 1656ms † |
+
+The headline gap is **accounted for by one stage**: end-of-turn (1565 vs 366 ≈ 1.2s, and the
+voice→voice gap is ~1.15s). Browser STT was *faster* to a first partial in these runs (591 vs
+714ms) — it just takes far longer to close the turn.
+
+† Not a Piper-vs-Piper comparison, for two reasons. This metric is measured from the *last* LLM
+first-token to first audio, and on this path the LLM prefetch fires at ~469ms while the turn
+doesn't commit until ~1570ms — so most of the 1656ms is the pipeline *waiting for end-of-turn*,
+counted again. Measured from turn commit → first audio, the same warm turns are **556ms** (vs
+1009ms on the deepgram row).
 
 ### Notes per configuration
 
@@ -81,6 +94,38 @@ mock LLM, so its row is not fully apples-to-apples (see caveats below).
   fastest barge-in of ours (mp3 clips need no un-cancellable local inference to drain).
 - **deepgram + Piper** — same latency, zero TTS cost, fully offline voice. Piper's WASM synth
   runs in a worker (`ort.env.wasm.proxy`); first-word clip ~185ms on a 32-core box.
+- **webspeech + Piper — the zero-key path, and what `examples/demo.html` runs by default.**
+  2126ms is **2.2× the deepgram + Piper row** (974ms, same synthesizer), and the gap is
+  end-of-turn: **EOT 1565ms vs 366**.
+  What the traces show, per turn (n=30, browser event log): Chrome is still emitting interim
+  frames at the moment the turn commits — on **30 of 30 turns** the last frame before commit
+  still carried a non-empty interim tail. The last frame that added *new words* lands ~178ms
+  **before** the person actually stops speaking; after that Chrome keeps re-emitting frames for
+  a further ~591ms median, and the turn then commits ~1177ms after the very last frame. In other
+  words the adapter still held an outstanding `interimTail` throughout the silence, and
+  voiceloop's `flush()` defers the close for exactly that reason (`TAIL_MAX_DEFERS` ×
+  `WEBSPEECH_EOT_MS`) — which is what turns a nominal 500ms debounce into ~1.5s.
+  Two fixes were attempted and **neither improved the benchmark — both reverted, not shipped**:
+  a short tail-poll instead of a full EOT window (2167ms — indistinguishable from baseline at
+  this run's ±300ms jitter), and ignoring unchanged interim frames when re-arming the clock
+  (2436ms *and* incorrect — 9 of 30 turns lost, 6 self-interruptions, 2 echo words).
+  Tellingly, **EOT stayed ~1570ms in every variant** (1560 / 1588 / 1582), including the one
+  that ignored repeats — so the cost is not the re-arming itself.
+  A caveat for whoever picks this up: the harness records `stt_final` at *voiceloop's* turn
+  close, not at Chrome's raw `isFinal`, so these traces cannot see when the engine actually
+  promoted the tail. Instrumenting that boundary is the prerequisite for the next attempt —
+  both failed fixes were tuning against a signal the bench can't observe.
+  The honest price of the zero-key path: **no API key, no token endpoint, ~1.15s slower to
+  answer.** Choose deepgram when latency matters; webspeech when setup cost does.
+  **Turn-0 cold start (fixed).** Measuring this config surfaced a real bug: `start()` returns
+  early for a selfCapture STT (it builds no mic pipeline) and that early return skipped the
+  deferred `tts.warm()`, which lived only in the pipeline branch. So the zero-key path — the one
+  path where nothing else is downloading — never pre-warmed Piper, and the *first* reply paid the
+  full model download + WASM compile. First-audio on turn 0 went **5422/5526/5712/5731/10166ms →
+  1037/1224/1362/1685/2609ms**, turn-0 voice→voice **6099 → 1930ms**, and the pooled p95 **6379 →
+  2607ms**. Warm turns are unchanged (1641 → 1656ms), which is what confirms it was cold start and
+  not a general shift. The headline median barely moves (2126 → 2113ms) because it was never a
+  turn-0 number — but the worst thing a user experienced was the very first thing they heard.
 - **EL Scribe / Speechmatics STT** — both gate the turn on late partials (~1.2–1.5s EOT):
   accurate transcripts, but not tuned for conversational end-of-turn. Deepgram flux's
   turn-events win this scenario.
@@ -115,17 +160,32 @@ mock LLM, so its row is not fully apples-to-apples (see caveats below).
   gate needs transcribed words (both showed 0 false barge-ins here — the scripted audio is
   clean speech).
 - **TODOforAI shared-voice** — NOT a competitor: our own product's shipped voice agent
-  (`todoforai/packages/shared-voice`, an earlier cousin of voiceloop), benchmarked in its
-  production default config (browser Web Speech STT + Piper 1.2×) via a thin SUT page +
-  `/llm` wire shim (`packages/shared-voice/bench/`). Per-run medians very tight (2393–2468ms).
-  The 1430ms gap to voiceloop·piper splits cleanly: **EOT delay 1570ms** vs 366 (Chrome
-  Web Speech endpointing + 500ms debounce + tail-defer waits, vs Deepgram flux native
-  turn events) and **TTS first audio 1930ms** vs 418 (its Piper path lacks voiceloop's
-  phonemizer reuse, `ort.env.wasm.proxy` worker inference, presynth, and runs without
-  crossOriginIsolated — single-threaded ONNX, like the production site). The p95 outlier
-  (~4.8s) is turn-0 Piper cold start. Barge-in is word-based like voiceloop (0 false
-  barge-ins) but slower to drain (1406ms). This row exists to track our shipped product
-  against the state of this repo — the deltas above are its upgrade backlog.
+  (`todoforai/packages/shared-voice`), benchmarked via a thin SUT page + `/llm` wire shim
+  (`packages/shared-voice/bench/`). It no longer carries a fork of this library: it consumes
+  published voiceloop 0.1.5 and adds only the JARVIS persona, LLM adapter and todo tools, so
+  these rows now measure *integration overhead*, not a second implementation.
+
+  **Re-measured on 0.1.5** (the earlier 2414ms row was the pre-swap fork): **2241ms** on the
+  shipped webspeech+Piper default, and the gap to voiceloop·webspeech (2124ms) is down to
+  **~120ms**. The TTS half of the old gap is essentially closed — **TTS first audio 1695ms
+  vs 1641 warm (was 1930 vs 418)** — because the phonemizer reuse, worker inference and
+  presynth it used to lack now come from the library. What remains is turn-0 cold start
+  (6177 vs 5712ms), i.e. the missing `crossOriginIsolated` / single-threaded ONNX on the
+  production origin, which no library swap can fix.
+
+  **Deepgram flux instead of browser STT: 2241 → 1801ms.** EOT collapses **1571 → 400ms**,
+  confirming on our own stack what the webspeech row predicted — the ~1.5s was Chrome's
+  endpointer, not our code (voiceloop measured the same 1565ms on the same browser STT).
+  The headline moves only 440ms because **the bottleneck relocates**: with EOT gone, Piper is
+  now the dominant stage at **1295ms of the 1823ms warm turn**. Deepgram also removes the
+  cold-start cliff (turn-0 TTS 6177 → 760ms) — its socket setup overlaps the Piper warm that
+  the selfCapture path serialises. Reaching voiceloop·deepgram's 984ms from here is a TTS
+  problem (EL flash, or `crossOriginIsolated` for multi-threaded Piper), not an STT one.
+
+  Barge-in is word-based like voiceloop (0 false barge-ins); it reads 915ms on webspeech and
+  1379ms on deepgram, but with n=10 and ranges of 416–1427 / 465–1894 that difference is not
+  separable from noise. This row exists to track our shipped product against the state of this
+  repo — the deltas above are its upgrade backlog.
 - **ConvAI** — measured through their standard `@elevenlabs/client` SDK with a default-config
   agent (scribe_realtime ASR, `turn_v3`/normal eagerness, `optimize_streaming_latency: 3`; we
   even upgraded its TTS from the default turbo_v2 to the faster flash_v2). Per-run medians were
