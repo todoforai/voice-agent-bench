@@ -1,38 +1,98 @@
 # voice-agent-bench
 
-A black-box latency benchmark for **any** voice agent: a scripted "person" (pre-generated
-speech, byte-identical every run) talks into a virtual mic, the agent's speaker output is
-recorded, and every score is derived from **audio alone** — voice→voice latency, barge-in stop
-time, stalls, false barge-ins, echo leakage. If it makes sound, it can be benchmarked: zero
-integration required.
+A black-box latency & behavior benchmark for **any** voice agent. A scripted "person"
+(pre-generated speech, byte-identical every run) talks into a virtual mic, the agent's speaker
+output is recorded, and every score is derived from **audio alone** — voice→voice latency,
+barge-in stop time, stalls, false barge-ins, echo leakage.
 
-It measures the REALTIME quality of a voice agent *implementation* — not the models inside it.
-STT/TTS models have their own rigorous benchmarks (LibriSpeech, TTS Arena…); the WER/fidelity
-columns here only check that the implementation feeds the models properly (no truncated turns,
-no echo in transcripts, no clipped replies). Latency numbers are **median + p95** (ms), never
-mean-only, and single runs are never reported: `blackbox/run-n.js` pools N conversations
-(±300ms network/WASM jitter has flipped single-run conclusions).
+**If it makes sound, it can be benchmarked. Zero integration required.**
 
-Fairness rules: every system under test gets the **same fixed mock LLM** (scripted responses,
-fixed TTFT and token rate — the numbers measure the voice pipeline, not the language model),
-the same audio devices, and the same scenario script. Results so far: [`results/RESULTS.md`](results/RESULTS.md).
+## Leaderboard
 
-Developed alongside [voiceloop](https://github.com/todoforai/voiceloop) ([live demo](https://todoforai.github.io/voiceloop/)
-— it lives at `bench/` there and is split to this repo), but the rig is agent-agnostic — SUT pages exist for voiceloop
-and ElevenLabs ConvAI, and adding one for Pipecat/Vapi/LiveKit/etc. is a page or script that
-talks to the virtual devices. PRs with new SUTs or scenarios welcome.
+Three scenarios: **clean** (smalltalk), **hesitating user** (mid-sentence pauses), **echo**
+(agent's own voice fed back into the mic, no AEC). Latency = voice→voice median, pooled over
+5 conversations × 6 turns (n=30).
 
-**Add your agent:** the full contract (interface, fairness rules, cloud tunneling, PR
-checklist) is in [`ADDING_A_SUT.md`](ADDING_A_SUT.md) — integration is just "listen on
-`bench_mic`, speak on `bench_spk`".
+| system | clean | hesitation | overlap → talked through | echo | cut itself |
+|---|---|---|---|---|---|
+| OpenAI Realtime \* | 870ms | 1290ms | 12/30 → **0** (yields in 130ms) | 790ms | **17/30** |
+| **voiceloop** · deepgram + EL flash | 980ms | 1400ms | 2/30 → **0** (420ms) | 930ms | **0** |
+| **voiceloop** · deepgram + Piper (free TTS, local) | 970ms | 1400ms | 0/30 → **0** | — | — |
+| **voiceloop** · webspeech + Piper (zero-key, browser STT) | 2110ms | — | — | — | — |
+| Pipecat 1.8.1 · same providers | 1050ms | 1290ms | 12/30 → **2** (200ms) | 1320ms | **20/30** |
+| ElevenLabs ConvAI | 1450ms | 1810ms | 2/30 → **0** (490ms) | 1410ms | 0 |
+
+\* speech-to-speech, its own LLM — every cascade system shares the fixed mock LLM; Realtime is
+the disclosed exception.
+
+Speed rankings barely move across scenarios — **what changes is who recovers**. Overlapping the
+user is not a failure (people do it constantly); riding over them when they keep talking, or
+cutting your own reply because you heard your own echo, is. Latency and behavior must be read
+together — neither column alone ranks a system.
+
+Full per-scenario tables, sub-metric splits and caveats: [`results/RESULTS.md`](results/RESULTS.md).
+
+## How it works
+
+```
+scenario.json ──► driver.js ──► bench_mic ──► [ your agent ] ──► bench_spk ──► analyze.js ──► report
+ (script)      (plays "person"                (any process                    (records &
+                audio, fixed)                  or browser)                     scores audio)
+```
+
+- The "person" audio is generated **once** (ElevenLabs) and replayed byte-identically every run.
+- Every cascade system gets the **same fixed mock LLM** (scripted responses, fixed TTFT and
+  token rate) — the numbers measure the voice pipeline, not the language model.
+- Latency numbers are **median + p95** (ms), never mean-only, and single runs are never
+  reported: `blackbox/run-n.js` pools N conversations (±300ms network/WASM jitter has flipped
+  single-run conclusions).
+
+## Quickstart
+
+1. Create the virtual mic/speaker pair (PulseAudio/PipeWire):
+
+   ```sh
+   blackbox/audio-setup.sh up
+   ```
+
+2. Generate the "person" audio (once, needs `ELEVENLABS_API_KEY`):
+
+   ```sh
+   node blackbox/gen-audio.js smalltalk
+   ```
+
+3. Start the bench server (static files + fixed mock LLM):
+
+   ```sh
+   node server.js smalltalk
+   ```
+
+4. Point your agent at the devices — it must listen on `bench_mic` and speak on `bench_spk`.
+   For a browser agent, e.g. voiceloop itself:
+
+   ```sh
+   PULSE_SOURCE=bench_mic PULSE_SINK=bench_spk google-chrome --user-data-dir=/tmp/sut \
+     --use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required \
+     http://localhost:7777/bench/blackbox/agent.html
+   ```
+
+5. Run the conversation and score it:
+
+   ```sh
+   node blackbox/driver.js smalltalk mylabel      # the virtual person talks
+   node blackbox/analyze.js results/bb-….json     # → markdown report
+   ```
+
+For pooled results (the only kind we publish), `blackbox/run-n.js <scenario> <label> [N=5]`
+drives Chrome over CDP and runs the whole loop N times.
 
 ## What we measure
 
 One scripted conversation, five times, all turns pooled (median + p95, n=30). Headline timing
-and behavior come from the recorded audio; the internal splits (EOT, STT partial, TTS first
-audio) only exist for instrumented SUTs and explain the audio-truth numbers, never replace them.
+and behavior come from the recorded audio; internal splits (EOT, STT partial, TTS first audio)
+only exist for instrumented SUTs and *explain* the audio-truth numbers, never replace them.
 
-**Latency** (ms, lower is better)
+### Latency (ms, lower is better)
 
 | number | meaning |
 |---|---|
@@ -43,7 +103,7 @@ audio) only exist for instrumented SUTs and explain the audio-truth numbers, nev
 | STT first partial | person starts → first partial transcript. |
 | TTS first audio | first LLM token → first audible synthesis. |
 
-**Behavior** (counts over 30 turns, 0 is perfect)
+### Behavior (counts over 30 turns, 0 is perfect)
 
 | number | meaning |
 |---|---|
@@ -56,24 +116,53 @@ audio) only exist for instrumented SUTs and explain the audio-truth numbers, nev
 | echo words | agent's own words leaking into its *user* transcript. |
 | WER / spoken ratio | transcript error rate / fraction of the reply actually delivered (uninterrupted replies only). |
 
-Latency and behavior must be read together: several stacks buy their speed by talking over
-users (hesitation scenario) or cutting themselves (echo scenario). Neither column alone ranks
-a system.
+### What we do NOT measure
 
-Two modes, one scorecard (`metrics.js`):
+Model quality. STT/TTS models have their own rigorous benchmarks (LibriSpeech, TTS Arena…);
+this bench measures the realtime quality of a voice agent *implementation*. The WER/fidelity
+columns only check that the implementation feeds the models properly — no truncated turns, no
+echo in transcripts, no clipped replies.
 
-- **Instrumented** (agents that emit milestone events): internal splits (EOT / TTFT / TTS-first-audio) merged into the audio timeline via epoch clock.
-- **Black-box** (any agent): audio in, audio out — zero integration. See `blackbox/`.
+## Two modes, one scorecard
 
-Black-box quickstart:
-```sh
-bench/blackbox/audio-setup.sh up                 # virtual mic/speaker pair
-node bench/blackbox/gen-audio.js smalltalk       # once: ElevenLabs "person" voice
-# point the agent's audio at the devices, e.g. voiceloop itself:
-DEEPGRAM_API_KEY=… node bench/server.js smalltalk &
-PULSE_SOURCE=bench_mic PULSE_SINK=bench_spk google-chrome --user-data-dir=/tmp/sut \
-  --use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required \
-  http://localhost:7777/bench/blackbox/agent.html
-node bench/blackbox/driver.js smalltalk mylabel  # the virtual person talks
-node bench/blackbox/analyze.js bench/results/bb-…json   # → markdown report
-```
+Both feed the same scorer (`metrics.js`):
+
+- **Black-box** (any agent): audio in, audio out — zero integration. See [`blackbox/`](blackbox/).
+- **Instrumented** (agents that emit milestone events): internal splits (EOT / TTFT /
+  TTS-first-audio) merged into the audio timeline via epoch clock.
+
+## Fairness rules
+
+Every system under test gets:
+
+- the **same fixed mock LLM** — scripted responses, fixed TTFT, fixed token rate;
+- the **same audio devices** (`bench_mic` / `bench_spk`);
+- the **same scenario script**, byte-identical person audio.
+
+Exceptions (e.g. speech-to-speech systems that can't use the mock LLM) are always disclosed
+next to their numbers.
+
+## Add your agent
+
+The whole integration is "listen on `bench_mic`, speak on `bench_spk`". The full contract —
+interface, fairness rules, working example SUTs (process, Pipecat, ElevenLabs ConvAI, OpenAI
+Realtime), cloud tunneling, PR checklist — is in [`ADDING_A_SUT.md`](ADDING_A_SUT.md).
+
+PRs with new SUTs or scenarios welcome.
+
+## Repo layout
+
+| path | what |
+|---|---|
+| `server.js` | static server + fixed mock LLM + result saving (zero deps) |
+| `metrics.js` | the scorer — one scorecard for both modes |
+| `scenarios/` | conversation scripts (`smalltalk`, `hesitation`, `echo`, `noise`) |
+| `audio/` | pre-generated "person" speech per scenario |
+| `blackbox/` | the rig: virtual devices, driver, analyzer, run-n pooling, example SUTs |
+| `results/` | published runs + [`RESULTS.md`](results/RESULTS.md) |
+
+## Origin
+
+Developed alongside [voiceloop](https://github.com/todoforai/voiceloop)
+([live demo](https://todoforai.github.io/voiceloop/)) — it lives at `bench/` there and is split
+to this repo — but the rig is agent-agnostic.
