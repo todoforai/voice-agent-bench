@@ -1,17 +1,15 @@
 # voice-agent-bench
 
-A black-box latency & behavior benchmark for **any** voice agent. A scripted "person"
-(pre-generated speech, byte-identical every run) talks into a virtual mic, the agent's speaker
+A black-box latency & behavior benchmark for **any** voice agent. 
+Evaluate metrics of different voice agents and pick the best tradeoff! 
+
+A scripted "person" (pre-generated speech, byte-identical every run) talks into a virtual mic, the agent's speaker
 output is recorded, and every score is derived from **audio alone** — voice→voice latency,
 barge-in stop time, stalls, false barge-ins, echo leakage.
 
 **If it makes sound, it can be benchmarked. Zero integration required.**
 
 ## Leaderboard
-
-Three scenarios: **clean** (smalltalk), **hesitating user** (mid-sentence pauses), **echo**
-(agent's own voice fed back into the mic, no AEC). Latency = voice→voice median, pooled over
-5 conversations × 6 turns (n=30).
 
 | system | clean | hesitation | overlap → talked through | echo | cut itself |
 |---|---|---|---|---|---|
@@ -25,10 +23,17 @@ Three scenarios: **clean** (smalltalk), **hesitating user** (mid-sentence pauses
 \* speech-to-speech, its own LLM — every cascade system shares the fixed mock LLM; Realtime is
 the disclosed exception.
 
+Three scenarios: 
+**clean** (smalltalk)
+**hesitating user** (mid-sentence pauses)
+**echo** (agent's own voice fed back into the mic, no AEC). Latency = voice→voice median, pooled over
+5 conversations × 6 turns (n=30).
+
 Speed rankings barely move across scenarios — **what changes is who recovers**. Overlapping the
-user is not a failure (people do it constantly); riding over them when they keep talking, or
-cutting your own reply because you heard your own echo, is. Latency and behavior must be read
-together — neither column alone ranks a system.
+user a bit is not a failure (people do it constantly)! Riding over them when they keep talking, or
+cutting your own reply because you heard your own echo, is. 
+
+Latency and behavior must be read together — neither column alone ranks a system.
 
 Full per-scenario tables, sub-metric splits and caveats: [`results/RESULTS.md`](results/RESULTS.md).
 
